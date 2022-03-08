@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <title>Waterstream Redpanda NYC Taxi Demo</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+
+    <script src="https://kit.fontawesome.com/93b990e741.js" crossorigin="anonymous"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.2.0/dist/leaflet.css"
+          integrity="sha512-M2wvCLH6DSRazYeZRIm1JnYyh22purTM+FDB5CsyxtQJYeKq83arPe5wgbNmcFXGqiSH2XR8dT/fJISVA1r/zQ=="
+          crossorigin=""/>
+
+    <link rel="stylesheet" type="text/css"
+          href="https://cdn.jsdelivr.net/npm/cookieconsent@3/build/cookieconsent.min.css"/>
+    <script src="https://unpkg.com/scrollreveal@4"></script>
+    <!--    <script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.0.1/mqttws31.min.js" type="text/javascript"></script>-->
+    <script src="js/paho-mqtt-1.0.3-min.js" type="text/javascript"></script>
+
+    <link rel="stylesheet" href="css/leaflet-sidebar.css"/>
+    <link rel="stylesheet" href="css/main.css"/>
+    <link rel="stylesheet" href="css/leaflet.extra-markers.min.css">
+
+    <link rel="icon"
+          type="image/png"
+          href="img/favicon.png"/>
+
+</head>
+
+<body>
+<div id="cookieconsent"></div>
+<!-- optionally define the sidebar content via HTML markup -->
+<div id="sidebar" class="leaflet-sidebar">
+
+    <!-- nav tabs -->
+    <div class="leaflet-sidebar-tabs">
+        <!-- top aligned tabs -->
+        <ul role="tablist">
+            <li><a href="#home" role="tab"><i class="fas fa-bars active"></i></a></li>
+        </ul>
+
+        <!-- bottom aligned tabs -->
+        <ul role="tablist">
+            <li><a href="#info" role="tab"><i class="fas fa-info-circle"></i></i></a></li>
+        </ul>
+    </div>
+
+    <!-- panel content -->
+    <div class="leaflet-sidebar-content" id="content">
+        <div class="leaflet-sidebar-pane" id="home">
+
+            <h1 class="leaflet-sidebar-header">
+                Waterstream Taxi Demo
+                <span class="leaflet-sidebar-close"><i class="fas fa-caret-left"></i></span>
+            </h1>
+
+            <div class="reveal mb20">
+                <h3>Waterstream Taxi Demo with Redpanda, Materialize, and Metabase</h3>
+                <p>Waterstream is a fully-fledged MQTT broker leveraging any Kafka compatible event streaming platform
+                    as its only storage and distribution
+                    engine. In this demo, Waterstream uses <a target="_blank" href="https://redpanda.com">Redpanda</a>
+                    as the backend, while the dashboard is created with <a href="https://metabase.com">Metabase</a>
+                    ingesting data processed by <a href="https://materialize.com">Materialize</a>.</p>
+            </div>
+            <div class="reveal mb20">
+                <h3>The NYC Taxi Demo</h3>
+                <p>We simulate several taxis driving around New York, but you can see only few of them
+                    on the map. Each taxi belongs to a company and, as it moves, it sends MQTT messages to Waterstream. The data includes:
+                <ul>
+                    <li>the current taxi position,</li>
+                    <li>the next way-point,</li>
+                    <li>the number of passengers carried and the speed.</li>
+                </ul>
+                Every message is saved directly into Redpanda in the topic <code>mqtt_messages</code>.
+                No additional service in the middle such as a connector is required to handle this.</p>
+            </div>
+            <div class="reveal mb20">
+                <h3>Real-time data analysis with Materialize</h3>
+                <p>Once it gets into Redpanda, Materialize can filter and aggregate streaming data in real-time using
+                    standard SQL. In the following code, we pick the top 10 taxi companies by passengers</p>
+            </div>
+            <div class="reveal mb20">
+                <code><pre>
+CREATE SOURCE json_redpanda
+FROM KAFKA BROKER 'redpanda:9092' 
+TOPIC 'mqtt_messages' 
+KEY FORMAT TEXT 
+VALUE FORMAT BYTES 
+INCLUDE KEY;
+
+CREATE VIEW jsonified_bytes AS
+SELECT CAST(data AS JSONB) AS data
+FROM (
+    SELECT CONVERT_FROM(data, 'utf8') AS data
+    FROM json_redpanda
+    WHERE key LIKE 'waterstream-taxi-demo/passengers_update/%'
+);
+
+CREATE VIEW passengers_by_company AS
+SELECT P.company, 
+       SUM(P.passengers) AS passengers_sum
+FROM (
+  SELECT
+      data->>'company' AS company,
+      CAST(COALESCE(data->'passengers', '0') AS INTEGER) 
+                       AS passengers
+    FROM jsonified_bytes
+) AS P
+GROUP BY P.company;
+
+CREATE MATERIALIZED VIEW taxis AS
+SELECT T.company, T.passengers
+FROM (
+  SELECT 
+    company AS company,
+    passengers_sum AS passengers
+  FROM passengers_by_company
+) AS T
+ORDER BY company ASC
+LIMIT 10;
+</pre>
+                </code>
+            </div>
+            <div class="reveal mb20">
+                <h3>Presenting data with Metabase</h3>
+                <p>Finally, the data is presented with a simple Metabase graph using <code>metabase-materialize-driver</code> to connect to Materialize.
+                </p>
+            </div>
+            <div class="reveal mb20">
+                <h3>Waterstream allows bidirectional communication, even with the browser</h3>
+                <p>Waterstream is a fully operational MQTT broker compatible with MQTT version 5 with WebSockets
+                    support. This page is an MQTT client receiving messages from Waterstream. It updates the
+                    markers on the map as long as new positions are written into Redpanda and translated to MQTT
+                    messages by Waterstream.</p>
+            </div>
+            <div class="reveal mb20">
+                <div class="text-center">
+                    <iframe th:src="${taxisStatsPanelAddress}" frameborder="0" width="380" height="460"
+                            allowtransparency></iframe>
+                </div>
+            </div>
+            <div class="reveal mb20">
+                <h3>Waterstream exposes metrics with Prometheus</h3>
+                <p> It's easy to collect and show data coming from Waterstream with
+                    Grafana. The following graph shows the current message rate and how many messages have
+                    been received so far by the Waterstream broker.</p>
+            </div>
+            <div class="reveal mb20">
+                <div class="text-center">
+                    <iframe th:src="${messageCountPanelAddress}" src="" width="380" height="250"
+                            frameborder="0"></iframe>
+                    <a class="btn btn-primary mt10 scroll-link" style="color: white;"
+                       target="_blank"
+                       th:href="${messageCountPanelLink}"
+                       data-id="contact">Open the dashboard</a>
+                </div>
+            </div>
+            <div class="reveal pb50">
+                <h3>Try Waterstream</h3>
+                <p>If you want to try Waterstream, go to <a target="_blank"
+                                                            href="https://try.waterstream.io">try.waterstream.io</a>
+                    and learn how to quickly deploy Waterstream on-prem or in the cloud.</p>
+                <div class="text-center">
+                    <a class="btn btn-primary mt10 scroll-link" style="color: white;" target="_blank"
+                       href="https://try.waterstream.io">Try Waterstream</a>
+                </div>
+            </div>
+        </div>
+        <div class="leaflet-sidebar-pane " id="info">
+            <h1 class="leaflet-sidebar-header">
+                Info
+                <span class="leaflet-sidebar-close"><i class="fas fa-info-circle"></i></span>
+            </h1>
+            <div>
+                <p> Want to know more about Waterstream? Check out <a href="https://waterstream.io">waterstream.io</a>.
+                </p>
+            </div>
+        </div>
+    </div>
+
+</div>
+</div>
+<div id="map"></div>
+
+<script src="https://unpkg.com/leaflet@1.2.0/dist/leaflet.js"
+        integrity="sha512-lInM/apFSqyy1o6s89K4iQUKg6ppXEgsVxT35HbzUupEVRh2Eu9Wdl4tHj7dZO0s1uvplcYGmt3498TtHq+log=="
+        crossorigin=""></script>
+<script src="../js/leaflet-sidebar.js"></script>
+
+<script src="https://cdn.jsdelivr.net/sockjs/0.3.4/sockjs.min.js"></script>
+<!--<script src="https://cdnjs.cloudflare.com/ajax/libs/vertx/3.8.3/vertx-eventbus.min.js"></script>-->
+<script src="../js/leaflet.extra-markers.js"></script>
+
+<script>
+    // standard leaflet map setup
+    let map = L.map('map');
+    map.setView([40.712772, -74.006058], 12);
+
+    L.tileLayer('https://api.mapbox.com/styles/v1/{id}/tiles/{z}/{x}/{y}?access_token=pk.eyJ1IjoibWFwYm94IiwiYSI6ImNpejY4NXVycTA2emYycXBndHRqcmZ3N3gifQ.rJcFIG214AriISLbB6B5aw', {
+        maxZoom: 18,
+        attribution: 'Map data &copy; <a href="https://www.openstreetmap.org/">OpenStreetMap</a> contributors, ' +
+            '<a href="https://creativecommons.org/licenses/by-sa/2.0/">CC-BY-SA</a>, ' +
+            'Imagery © <a href="https://www.mapbox.com/">Mapbox</a>',
+        id: 'mapbox/streets-v11',
+        tileSize: 512,
+        zoomOffset: -1
+    }).addTo(map);
+
+    // create the sidebar instance and add it to the map
+    const sidebar = L.control.sidebar({container: 'sidebar'})
+        .addTo(map)
+        .open('home');
+
+    // be notified when a panel is opened
+    sidebar.on('content', function (ev) {
+        switch (ev.id) {
+            case 'autopan':
+                sidebar.options.autopan = true;
+                break;
+            default:
+                sidebar.options.autopan = false;
+        }
+    });
+
+    let registry = new Map()
+
+    let plateToFollow = null
+
+    function addMarker(vehicle) {
+        console.log("Add marker", vehicle.plate);
+        var follow = vehicle.follow;
+
+        var markerIcon = L.ExtraMarkers.icon({
+            icon: 'fas fa-taxi',
+            markerColor: vehicle.companyColor,
+            shape: vehicle.companyShape,
+            prefix: 'fa'
+        })
+
+        let marker = L.marker([vehicle.current.lat, vehicle.current.lng], {
+            draggable: false,
+            title: 'Taxi: ' + vehicle.plate + ' \nPassengers#: ' + vehicle.passengers + ' \nCompany: ' + vehicle.companyName,
+            icon: markerIcon,
+            riseOnHover: true,
+            keepAtCenter: follow
+        })
+            .addTo(map)
+            .bindPopup(vehicle.companyName + ' Taxi ' + vehicle.plate + ' <br>Passengers#: ' + vehicle.passengers);
+
+        if (plateToFollow == null) {
+            plateToFollow = vehicle.plate
+        }
+
+        if (plateToFollow == vehicle.plate) {
+            console.log("This is the taxi to follow ", vehicle.plate);
+            marker.openPopup();
+            map.setView([vehicle.current.lat, vehicle.current.lng], 14);
+        } else {
+            console.debug("Other vehicle is followed instead of this", plateToFollow, vehicle.plate)
+        }
+
+        registry.set(vehicle.plate, marker);
+    }
+
+    function cleanMarkers() {
+        let markers = Array.from(registry.values());
+        markers.forEach(function (m) {
+            map.removeLayer(m);
+        });
+        registry = new Map()
+    }
+
+
+    function plateFromMqttTopic(topic) {
+        const lastSlash = topic.lastIndexOf("/")
+        if (lastSlash <= 0)
+            return topic
+        else
+            return topic.slice(lastSlash)
+    }
+
+    const mqttClientId = "[[${mqttClientPrefix}]]" + Math.floor(Math.random() * 1000000)
+    const mqttClient = new Paho.MQTT.Client("[[${mqttHost}]]", [[${mqttPort}]], "", mqttClientId);
+
+    function connectMqtt() {
+        console.debug("connecting MQTT client..")
+        mqttClient.connect({
+            useSSL: [[${mqttUseSsl}]],
+            cleanSession: true,
+            mqttVersion: 4,
+            onSuccess: function () {
+                console.debug("MQTT client connected", mqttClientId)
+                mqttClient.subscribe("[[${mqttVisibleVehiclesTopicPrefix}]]#")
+                console.debug("Subscribed for MQTT topics")
+            }
+        })
+    }
+
+    mqttClient.onConnectionLost = function () {
+        console.warn("MQTT connection lost, reconnecting in 5 seconds...", mqttClientId)
+        cleanMarkers()
+        setTimeout(connectMqtt, 5000)
+    }
+    mqttClient.onMessageArrived = function (message) {
+        if (message.destinationName.startsWith("[[${mqttVisibleVehiclesTopicPrefix}]]")) {
+            //vehicle changes message
+            if (message.payloadString.length == 0) {
+                //vehicle deleted
+                const plate = plateFromMqttTopic(message.destinationName)
+                console.debug("vehicle deleted", message.destinationName, plate)
+                const marker = registry.get(plate);
+                map.removeLayer(marker);
+                registry.delete(plate);
+            } else {
+                //vehicle moved/created
+                try {
+                    const vehicle = JSON.parse(message.payloadString)
+                    console.debug("vehicle moved", message.destinationName, vehicle)
+
+                    let marker = registry.get(vehicle.plate);
+                    if (marker == null) {
+                        addMarker(vehicle)
+                    }
+                    marker = registry.get(vehicle.plate);
+                    marker.setLatLng(L.latLng(vehicle.current.lat, vehicle.current.lng));
+                } catch (e) {
+                    console.warn("Failed to create/update vehicle", e)
+                }
+            }
+        }
+    }
+
+    connectMqtt()
+
+
+
+
+
+
+</script>
+
+<script>
+    ScrollReveal().reveal('#content .reveal', {
+        container: '#content',
+        origin: 'top',
+        scale: 0.6,
+        duration: 1500,
+        delay: 50
+    })
+
+
+
+
+</script>
+
+<script src="https://cdn.jsdelivr.net/npm/cookieconsent@3/build/cookieconsent.min.js"></script>
+<script>
+    window.cookieconsent.initialise({
+        container: document.getElementById("cookieconsent"),
+        palette: {
+            popup: {background: "#352B48"},
+            button: {background: "#0067FF"},
+        },
+        revokable: false,
+        onStatusChange: function (status) {
+            console.log(this.hasConsented() ?
+                'enable cookies' : 'disable cookies');
+        },
+        "position": "bottom-right",
+        "theme": "classic",
+        "domain": "https://taxidemo.waterstream.io/",
+        "secure": true,
+        "content": {
+            "header": 'Cookies used on the website!',
+            "message": 'This website uses cookies to improve your experience.',
+            "dismiss": 'Got it!',
+            "allow": 'Allow cookies',
+            "deny": 'Decline',
+            "link": 'Learn more',
+            "href": '',
+            "close": '&#x274c;',
+            "policy": 'Cookie Policy',
+            "target": '_blank',
+        }
+    });
+
+
+
+
+
+
+</script>
+</body>
+</html>

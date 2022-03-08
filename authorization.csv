@@ -1,0 +1,4 @@
+Topic,                                            Action, 		    Condition,   				    Outcome
+#,          						                                PUBLISH,      authenticated=true,  ALLOW
+#,          						                                SUBSCRIBE,    authenticated=true,  ALLOW
+waterstream-fleet-demo/visible_vehicle_updates/#,	SUBSCRIBE,                      ,		ALLOW

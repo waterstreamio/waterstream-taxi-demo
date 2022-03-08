@@ -1,0 +1,246 @@
+version: '3.4'
+
+networks:
+  mqttd-demo:
+    external:
+      name: ${DOCKER_DEMO_NETWORK}
+
+volumes:
+  grafana-data:
+  materialize-data:
+  redpanda-data:
+
+services:
+  metabase:
+    image: "metabase/metabase:v0.41.6"
+    container_name: metabase
+    depends_on:
+      - materialize
+    environment:
+      - MB_DB_FILE=/metabase-data/metabase.db
+    networks:
+      - mqttd-demo
+    ports:
+      - "3000:3000"
+    volumes:
+      - '~/metabase-data:/metabase-data'
+      - ./metabase-materialize-driver/materialize-driver.jar:/plugins/materialize-driver.jar
+    restart: unless-stopped
+
+  materialize:
+    build:
+      context: .
+      dockerfile: ./materialize/Dockerfile
+    container_name: materialize
+    depends_on:
+      - redpanda
+    networks:
+      - mqttd-demo
+    environment:
+      WORKERS: 1
+    volumes:
+      - materialize-data:/mzdata
+      - ./materialize/passengersByCompanyQuery.sql:/var/passengersByCompanyQuery.sql
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+#          memory: 8192M
+    restart: unless-stopped
+
+  redpanda:
+    image: "docker.vectorized.io/vectorized/redpanda:${REDPANDA_VERSION}"
+    container_name: redpanda
+    networks:
+      - mqttd-demo
+    environment:
+      DEBIAN_FRONTEND: noninteractive
+#      REDPANDA_RELEASE: v21.4.12
+      REDPANDA_RELEASE: ${REDPANDA_VERSION}
+    command:
+      - "redpanda start --smp 1 --reserve-memory 4G --overprovisioned --node-id 0 \
+      --kafka-addr PLAINTEXT://0.0.0.0:29092,OUTSIDE://0.0.0.0:9092 \
+      --advertise-kafka-addr PLAINTEXT://redpanda:29092,OUTSIDE://redpanda:9092 \
+      --default-log-level=info \
+      --set redpanda.enable_idempotence=true"
+      #--logger-log-level kafka=trace \
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+    restart: unless-stopped
+    healthcheck:
+      test: "curl -f localhost:9644/v1/status/ready"
+      interval: 5s
+      timeout: 15s
+      start_period: 10s
+
+  redpanda-setup:
+    image: "docker.vectorized.io/vectorized/redpanda:${REDPANDA_VERSION}"
+    networks:
+      - mqttd-demo
+    depends_on:
+      - redpanda
+    environment:
+      REDPANDA_BROKERS: redpanda:9092
+    entrypoint: ["/bin/bash","-c"]
+    command: "'echo Sleep to let Redpanda start... && \
+      sleep 15s && \
+      echo Creating Redpanda topics... && \
+      rpk topic create __waterstream_heartbeat --partitions 1 -r 1 -c retention.ms=300000 && \
+      rpk topic create  ${SESSION_TOPIC} --partitions 5 -r 1 -c cleanup.policy=compact -c min.compaction.lag.ms=60000 -c delete.retention.ms=600000 && \
+      rpk topic create  ${RETAINED_MESSAGES_TOPIC} --partitions 5 -r 1 -c cleanup.policy=compact -c min.compaction.lag.ms=60000 -c delete.retention.ms=600000 && \
+      rpk topic create  ${CONNECTION_TOPIC} --partitions 5 -r 1 -c cleanup.policy=delete -c retention.ms=600000 && \
+      rpk topic create  ${MESSAGES_DEFAULT_TOPIC} --partitions 5 -r 1 $DEFAULT_MESSAGES_RETENTION'"
+    restart: "no"
+
+  fleet-service:
+    image: io.simplematter/taxi-demo-fleet-service
+    container_name: fleet-service
+    depends_on:
+      - routing
+      - waterstream
+    networks:
+      - mqttd-demo
+#    ports:
+#      - "8081:8081" #HTTP for event bus
+#      - "8091:8091" #Prometheus monitoring
+    environment:
+      ROUTING_URL: http://routing:8080/ors/directions
+      VEHICLES_TOTAL_NUMBER: ${VEHICLES_TOTAL_NUMBER}
+      VEHICLES_VISIBLE_NUMBER: ${VEHICLES_VISIBLE_NUMBER}
+      MQTT_HOST: waterstream
+      MQTT_PORT: 1883
+      MQTT_TOPIC_PREFIX: waterstream-fleet-demo/
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS}
+      MONITORING_PORT: 8091
+      MONITORING_INCLUDE_JAVA_METRICS: "true"
+      MQTT_USERNAME: ${MQTT_USERNAME}
+      MQTT_PASSWORD: ${MQTT_PASSWORD}
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+    restart: unless-stopped
+
+  fleet-ui:
+    image: io.simplematter/taxi-demo-fleet-ui
+    container_name: fleet-ui
+    environment:
+      MESSAGE_COUNT_PANEL_ADDRESS: ${MESSAGE_COUNT_PANEL_ADDRESS}
+      TAXIS_STATS_PANEL_ADDRESS: ${TAXIS_STATS_PANEL_ADDRESS}
+      MQTT_WS_HOST: ${MQTT_WS_HOST}
+      MQTT_WS_PORT: ${MQTT_WS_PORT}
+      MQTT_WS_USE_SSL: ${MQTT_WS_USE_SSL}
+    depends_on:
+      - fleet-service
+    networks:
+      - mqttd-demo
+    ports:
+      - '8082:8080'
+    restart: unless-stopped
+
+  waterstream:
+    image: "simplematter/waterstream-kafka:${WATERSTREAM_VERSION}"
+    container_name: waterstream
+    depends_on:
+      - redpanda
+      - redpanda-setup
+    networks:
+      - mqttd-demo
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: "PLAINTEXT://redpanda:9092"
+      COROUTINES_THREADS: ${COROUTINES_THREADS}
+      KAFKA_TRANSACTIONAL_ID: ""
+      MQTT_PORT: 1883
+      MQTT_WS_PORT: 1893
+      MONITORING_PORT: 1884
+      MONITORING_INCLUDE_JAVA_METRICS: "true"
+      KAFKA_MESSAGES_DEFAULT_TOPIC: ${MESSAGES_DEFAULT_TOPIC}
+      KAFKA_MESSAGES_TOPICS_PATTERNS: ${MESSAGES_TOPICS_PATTERNS}
+      #some operations are permitted to anonymous, some - not
+      AUTHENTICATION_REQUIRED: "false"
+      AUTHENTICATION_METHOD_PLAIN_USERS_FILE_ENABLED: "true"
+      USERS_FILE_PATH: "/etc/users.properties"
+      AUTHORIZATION_RULES_PATH: "/etc/authorization.csv"
+    volumes:
+      - ./users.properties:/etc/users.properties
+      - ./authorization.csv:/etc/authorization.csv
+      - ./waterstream.license:/etc/waterstream.license
+    ports:
+#      - "1883:1883" #MQTT
+      - "1893:1893" #MQTT over WebSocket
+#      - "1884:1884" #Prometheus monitoring
+    restart: unless-stopped
+    healthcheck:
+      test: "curl -f localhost:1884/metrics"
+      interval: 15s
+      timeout: 15s
+      start_period: 15s
+
+  routing:
+    image: io.simplematter/openrouteservice
+    container_name: routing
+    networks:
+      - mqttd-demo
+    volumes:
+      - ./volumes/ors/graphs:/ors-core/data/graphs
+      - ./volumes/ors/elevation_cache:/ors-core/data/elevation_cache
+      - ./volumes/ors/logs/ors/:/var/log/ors/
+      - ./volumes/ors/logs/tomcat/:/usr/local/tomcat/logs
+      - ./routing/app.config:/ors-core/openrouteservice/target/classes/app.config
+      - ./volumes/ors/data/new-york-latest.osm.pbf:/ors-core/data/osm_file.pbf
+    environment:
+      - BUILD_GRAPHS=False  # Forces the container to rebuild the graphs, e.g. when PBF is changed in app.config
+      - JAVA_OPTS="-Djava.awt.headless=true -server -XX:TargetSurvivorRatio=75 -XX:SurvivorRatio=64 -XX:MaxTenuringThreshold=3 -XX:+UseConcMarkSweepGC -XX:+UseParNewGC -XX:ParallelGCThreads=4 -Xms${ROUTING_HEAP} -Xmx${ROUTING_HEAP}"
+#      - CATALINA_OPTS="-Dcom.sun.management.jmxremote -Dcom.sun.management.jmxremote.port=9001 -Dcom.sun.management.jmxremote.rmi.port=9001 -Dcom.sun.management.jmxremote.authenticate=false -Dcom.sun.management.jmxremote.ssl=false -Djava.rmi.server.hostname=localhost"
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.33.1
+    container_name: prometheus
+    networks:
+      - mqttd-demo
+    volumes:
+      - ./prometheusConfig.yml:/etc/prometheus/prometheus.yml
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:8.2.6
+    container_name: grafana
+    networks:
+      - mqttd-demo
+    volumes:
+      - ./grafana/datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml
+      - ./grafana/dashboard-provider.yaml:/etc/grafana/provisioning/dashboards/provider.yaml
+      - ./grafana/dashboards:/var/waterstream_monitoring/dashboards
+      - ./grafana/waterstream-square-logo.svg:/usr/share/grafana/public/img/grafana_icon.svg
+      - ./grafana/waterstream-square-logo-512px.png:/usr/share/grafana/public/img/fav32.png
+      - grafana-data:/var/lib/grafana
+    environment:
+      GF_SECURITY_ALLOW_EMBEDDING: "true"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_NAME: "anonymous_org"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
+    ports:
+      - "3001:3000"
+    restart: unless-stopped
+
+  grafana-setup:
+    image: curlimages/curl:7.69.1
+    networks:
+      - mqttd-demo
+    depends_on:
+      - grafana
+    volumes:
+      - ./grafana/provisionGrafana.sh:/etc/grafana/provisionGrafana.sh
+    command: "/bin/sh /etc/grafana/provisionGrafana.sh"
+    restart: "no"
+
+  #Automatically restarts containers that don't pass the healthcheck
+  autoheal:
+    image: willfarrell/autoheal
+    environment:
+      AUTOHEAL_CONTAINER_LABEL: all
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+
